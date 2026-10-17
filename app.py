@@ -1,12 +1,72 @@
-# DANS Dashboard, remplace tout le if menu == "Dashboard": par ceci:
+import streamlit as st
+import psycopg2
+import pandas as pd
+from math import radians, cos, sin, asin, sqrt
+import urllib.parse
+import matplotlib.pyplot as plt
+from datetime import datetime, timedelta
+import io
+
+st.set_page_config(page_title="Benin Lits V6.3 Global+Filtre", layout="wide")
+
+CENTRES = {
+    "CS COVE": {"lat": 7.216, "lon": 2.336, "lits_total": 0, "password": "cove123", "type": "CS"},
+    "CS ZAGNANADO": {"lat": 7.278, "lon": 2.482, "lits_total": 0, "password": "zagna123", "type": "CS"},
+    "CS OUINHI": {"lat": 7.05, "lon": 2.48, "lits_total": 0, "password": "ouinhi123", "type": "CS"},
+    "CS DJIDJA": {"lat": 7.34, "lon": 1.93, "lits_total": 0, "password": "djidja123", "type": "CS"},
+    "CS ABOMEY": {"lat": 7.182, "lon": 1.99, "lits_total": 0, "password": "abomey123", "type": "CS"},
+    "CHD Zou Abomey": {"lat": 7.182, "lon": 1.99, "lits_total": 50, "password": "chd123", "type": "CHD"},
+    "CNHU Cotonou": {"lat": 6.36, "lon": 2.42, "lits_total": 30, "password": "cnhu123", "type": "CNHU"},
+}
+
+def haversine(lat1, lon1, lat2, lon2):
+    R=6371; dlat=radians(lat2-lat1); dlon=radians(lon2-lon1)
+    a=sin(dlat/2)**2 + cos(radians(lat1))*cos(radians(lat2))*sin(dlon/2)**2
+    return round(2*R*asin(sqrt(a)),1)
+
+def get_conn():
+    url = st.secrets["DATABASE_URL"] if "DATABASE_URL" in st.secrets else st.secrets["DB_URL"]
+    return psycopg2.connect(url)
+
+def init_db():
+    conn=get_conn(); cur=conn.cursor()
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS benin_refs (
+        id SERIAL PRIMARY KEY, date TIMESTAMP DEFAULT NOW(),
+        centre_origine TEXT, centre_dest TEXT, motif TEXT, age INT, sexe TEXT, details TEXT,
+        distance_km FLOAT, statut TEXT DEFAULT 'en_cours',
+        contre_issue TEXT, contre_diag TEXT, contre_traitement TEXT, contre_reco TEXT, date_sortie TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS lits (centre TEXT PRIMARY KEY, lits_total INT, lits_occupes INT DEFAULT 0);
+    """)
+    for nom, info in CENTRES.items():
+        if info["lits_total"]>0:
+            cur.execute("INSERT INTO lits (centre,lits_total,lits_occupes) VALUES (%s,%s,0) ON CONFLICT (centre) DO NOTHING", (nom, info["lits_total"]))
+    conn.commit(); conn.close()
+init_db()
+
+if "centre" not in st.session_state:
+    st.title("🏥 Benin Lits V6.3")
+    c = st.selectbox("Je suis", list(CENTRES.keys()))
+    pwd = st.text_input("Mot de passe", type="password")
+    if st.button("Se connecter"):
+        if pwd == CENTRES[c]["password"]:
+            st.session_state.centre=c; st.rerun()
+        else: st.error("Mot de passe incorrect")
+    st.stop()
+
+centre_actuel = st.session_state.centre
+st.sidebar.success(f"Connecté: {centre_actuel}")
+if st.sidebar.button("Déconnexion"): del st.session_state.centre; st.rerun()
+menu = st.sidebar.radio("Menu", ["Dashboard", "Nouvelle Référence", "Mes Réceptions", "Contre-références reçues"])
+conn = get_conn()
 
 if menu == "Dashboard":
     st.subheader(f"Dashboard - {centre_actuel}")
-    
     df_ref_all = pd.read_sql("SELECT * FROM benin_refs", conn)
     df_lits = pd.read_sql("SELECT * FROM lits", conn)
 
-    # ========== BLOC 1 : POINT GLOBAL (comme sur ta photo) ==========
+    # ===== POINT GLOBAL =====
     st.write("## 🌍 POINT GLOBAL - Tous centres, toutes dates")
     total_lits_g = df_lits["lits_total"].sum() if not df_lits.empty else 0
     total_occ_g = df_lits["lits_occupes"].sum() if not df_lits.empty else 0
@@ -34,16 +94,16 @@ if menu == "Dashboard":
         with colB:
             st.write("### 🛏️ Lits par Centre - Global")
             df_lits["lits_dispo"] = df_lits["lits_total"] - df_lits["lits_occupes"]
+            df_lits["taux_occ"] = round(df_lits["lits_occupes"]/df_lits["lits_total"]*100,1)
             st.dataframe(df_lits)
-        
-        st.write("### 📍 Cumul Distance Global par Centre")
+        st.write("### 📍 Cumul Global par Centre")
         cumul_global = df_ref_all.groupby("centre_origine")["distance_km"].agg(['count','sum']).reset_index()
         cumul_global.columns = ["Centre", "Nb Réf", "Cumul km"]
         st.dataframe(cumul_global, use_container_width=True)
 
     st.divider()
     
-    # ========== BLOC 2 : POINT FILTRE ==========
+    # ===== POINT FILTRE =====
     st.write("## 🔍 POINT FILTRÉ - Par Date / Centre / Niveau")
     f1,f2,f3,f4,f5 = st.columns(5)
     with f1: date_debut = st.date_input("Du", datetime.now() - timedelta(days=30), key="f_debut")
@@ -52,46 +112,13 @@ if menu == "Dashboard":
     with f4: centre_filtre = st.selectbox("Centre Origine", ["Tous"] + list(CENTRES.keys()), key="f_centre")
     with f5: dest_filtre = st.selectbox("Destination", ["Tous"] + [c for c in CENTRES if CENTRES[c]["type"]!="CS"], key="f_dest")
     
-    raccourci = st.selectbox("Raccourci date", ["Personnalisé", "Aujourd'hui", "7 jours", "Ce mois", "Tout"], index=4)
+    raccourci = st.selectbox("Raccourci", ["Personnalisé", "Aujourd'hui", "7 jours", "Ce mois", "Tout"], index=4)
     if raccourci == "Aujourd'hui": date_debut = date_fin = datetime.now().date()
     elif raccourci == "7 jours": date_debut = (datetime.now() - timedelta(days=7)).date()
     elif raccourci == "Ce mois": date_debut = datetime.now().replace(day=1).date()
     elif raccourci == "Tout": date_debut = datetime(2020,1,1).date()
 
-    # Filtrage
     df_ref = df_ref_all.copy()
     if not df_ref.empty:
         df_ref['date_only'] = pd.to_datetime(df_ref['date']).dt.date
-        df_ref = df_ref[(df_ref['date_only'] >= date_debut) & (df_ref['date_only'] <= date_fin)]
-        if niveau != "Tous":
-            centres_niveau = [k for k,v in CENTRES.items() if v["type"]==niveau]
-            df_ref = df_ref[df_ref['centre_origine'].isin(centres_niveau) | df_ref['centre_dest'].isin(centres_niveau)]
-        if centre_filtre != "Tous": df_ref = df_ref[df_ref['centre_origine']==centre_filtre]
-        if dest_filtre != "Tous": df_ref = df_ref[df_ref['centre_dest']==dest_filtre]
-
-    st.info(f"Filtré: {date_debut} au {date_fin} | Niveau: {niveau} | Origine: {centre_filtre} -> {len(df_ref)} ref(s) | Cumul: {round(df_ref['distance_km'].sum(),1) if not df_ref.empty else 0} km")
-    
-    if not df_ref.empty:
-        c1,c2,c3 = st.columns(3)
-        c1.metric("Réf Filtrées", len(df_ref))
-        c2.metric("Cumul Distance Filtré", f"{round(df_ref['distance_km'].sum(),1)} km")
-        c3.metric("Moyenne Distance", f"{round(df_ref['distance_km'].mean(),1)} km")
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            st.write("#### Camembert Filtré")
-            mc = df_ref["motif"].value_counts()
-            fig2, ax2 = plt.subplots(); ax2.pie(mc, labels=mc.index, autopct='%1.1f%%'); ax2.axis('equal'); st.pyplot(fig2)
-        with col2:
-            st.write("#### Cumul par Centre Filtré")
-            cumul_f = df_ref.groupby("centre_origine")["distance_km"].agg(['count','sum']).reset_index()
-            cumul_f.columns = ["Centre", "Nb", "Cumul km"]; st.dataframe(cumul_f)
-            st.bar_chart(cumul_f.set_index("Centre")["Cumul km"])
-
-        # Export
-        buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-            df_ref.to_excel(writer, sheet_name='Filtre', index=False)
-            cumul_global.to_excel(writer, sheet_name='Global', index=False)
-        st.download_button("📥 Export Excel (Point Filtré)", buffer.getvalue(), file_name=f"benin_lits_{niveau}_{date_debut}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        st.dataframe(df_ref.sort_values("date", ascending=False))
+        df_ref = df_ref
