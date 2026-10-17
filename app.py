@@ -2,7 +2,6 @@ import streamlit as st
 import psycopg2
 import pandas as pd
 import plotly.express as px
-from datetime import datetime
 
 st.set_page_config(page_title="Bénin LITS - Références", layout="wide")
 
@@ -22,13 +21,10 @@ def get_data():
     conn.close()
     return df
 
-# --- SIDEBAR ---
 st.sidebar.title("Bénin LITS")
 menu = st.sidebar.radio("Navigation", ["Nouvelle Référence", "Liste Références", "Saisie Issue (CHD/ZH)", "Dashboard"])
 
-df = get_data() if menu != "Nouvelle Référence" else pd.DataFrame()
-
-# 1. NOUVELLE REFERENCE
+# --- 1. NOUVELLE REF ---
 if menu == "Nouvelle Référence":
     st.title("📝 Nouvelle Référence")
     with st.form("ref"):
@@ -41,8 +37,7 @@ if menu == "Nouvelle Référence":
             centre_rec = st.selectbox("Centre receveur", ["CHD Mono","CHD Atacora","CHU-MEL","CHD Zou","CHD Ouémé","CHD Plateau","Autre"])
             gestite = st.text_input("G/P")
             transport = st.selectbox("Transport", ["Ambulance","Moto","Véhicule perso"])
-        submit = st.form_submit_button("Envoyer")
-        if submit:
+        if st.form_submit_button("Envoyer"):
             conn = get_connection()
             cur = conn.cursor()
             cur.execute('INSERT INTO "references" (centre_emetteur, centre_receveur, motif, age, gestite, transport, date_reference) VALUES (%s,%s,%s,%s,%s,%s,NOW())',
@@ -50,20 +45,20 @@ if menu == "Nouvelle Référence":
             conn.commit()
             conn.close()
             st.success("Envoyée !")
-            st.balloons()
 
-# 2. LISTE
+# --- 2. LISTE ---
 elif menu == "Liste Références":
+    df = get_data()
     st.title(f"📋 Liste - TOTAL {len(df)}")
     st.dataframe(df, use_container_width=True)
 
-# 3. SAISIE ISSUE
+# --- 3. SAISIE ISSUE ---
 elif menu == "Saisie Issue (CHD/ZH)":
-    st.title("🩺 Clôturer une référence - CHD/ZH")
+    st.title("🩺 Clôturer - CHD/ZH")
+    df = get_data()
     if df.empty:
         st.warning("Aucune donnée")
     else:
-        # sécuriser colonnes
         for col in ['issue_mere','issue_accouchement','issue_nouveau_ne']:
             if col not in df.columns:
                 df[col] = ""
@@ -71,8 +66,6 @@ elif menu == "Saisie Issue (CHD/ZH)":
         st.metric("En attente de clôture", len(df_non))
         id_ref = st.selectbox("ID à clôturer", df_non['id'].tolist() if not df_non.empty else [])
         if id_ref:
-            row = df[df['id']==id_ref].iloc[0]
-            st.info(f"Motif: {row['motif']} | De: {row['centre_emetteur']}")
             c1,c2,c3 = st.columns(3)
             with c1:
                 mere = st.selectbox("Mère", ["Vivante","Décédée","Sortie contre avis médical","Référée à nouveau","Évacuée"])
@@ -87,52 +80,79 @@ elif menu == "Saisie Issue (CHD/ZH)":
                             (mere, acc, nn, int(id_ref)))
                 conn.commit()
                 conn.close()
-                st.success(f"Issue {id_ref} enregistrée")
+                st.success("Issue enregistrée")
 
-# 4. DASHBOARD V6.8 + TOTAL + ISSUES
+# --- 4. DASHBOARD = ANCIEN + NOUVEAUX KPI ---
 elif menu == "Dashboard":
-    st.title("📊 Dashboard V6.8")
+    df = get_data()
     if df.empty:
         st.warning("Pas de données")
     else:
-        st.metric("TOTAL GÉNÉRAL", len(df))
-        # sécuriser
         for col in ['issue_mere','issue_accouchement','issue_nouveau_ne']:
             if col not in df.columns:
                 df[col] = ""
         
-        # Graph motifs
+        # ===== ANCIEN DASHBOARD - ON GARDE TOUT =====
+        st.title("📊 Dashboard")
+        st.metric("TOTAL GÉNÉRAL DES RÉFÉRENCES", len(df))
+        
         if 'motif' in df.columns:
             counts = df['motif'].value_counts().reset_index()
             counts.columns = ['Motif','Effectif']
             fig = px.bar(counts, x='Effectif', y='Motif', orientation='h', text='Effectif', title=f"Motifs (Total {len(df)})")
             fig.update_layout(yaxis={'categoryorder':'total ascending'})
             st.plotly_chart(fig, use_container_width=True)
+
+        colA, colB = st.columns(2)
+        with colA:
+            if 'centre_emetteur' in df.columns:
+                c = df['centre_emetteur'].value_counts().reset_index()
+                c.columns = ['Centre','N']
+                st.plotly_chart(px.bar(c, x='N', y='Centre', orientation='h', title="Par centre émetteur"), use_container_width=True)
+        with colB:
+            if 'centre_receveur' in df.columns:
+                c = df['centre_receveur'].value_counts().reset_index()
+                c.columns = ['Centre','N']
+                st.plotly_chart(px.bar(c, x='N', y='Centre', orientation='h', title="Par centre receveur"), use_container_width=True)
         
+        if 'transport' in df.columns:
+            st.plotly_chart(px.pie(df, names='transport', title="Transport"), use_container_width=True)
+
         st.divider()
-        st.subheader("🩺 Issues - Devenir")
+        
+        # ===== NOUVEAUX KPI - AJOUTÉS EN DESSOUS =====
+        st.subheader("🩺 NOUVEAU - Issues (Devenir après référence)")
         df_clot = df[df['issue_mere'].notna() & (df['issue_mere']!="")].copy()
+        
         if df_clot.empty:
-            st.info("Aucune issue saisie par CHD/ZH pour le moment")
+            st.info("Aucune issue saisie encore par le CHD/ZH. Utilisez le menu 'Saisie Issue'")
         else:
+            st.write(f"**Taux de clôture: {len(df_clot)} / {len(df)} = {len(df_clot)/len(df)*100:.1f}%**")
+            
             nb_vb = len(df_clot[df_clot['issue_accouchement']=='Voie basse'])
             nb_ces = len(df_clot[df_clot['issue_accouchement']=='Césarienne'])
-            prop = nb_ces/(nb_vb+nb_ces)*100 if (nb_vb+nb_ces)>0 else 0
-            a,b,c = st.columns(3)
-            a.metric("Voie basse", nb_vb)
-            b.metric("Césarienne", nb_ces)
-            c.metric("% Césarienne", f"{prop:.1f}%")
+            prop_ces = nb_ces/(nb_vb+nb_ces)*100 if (nb_vb+nb_ces)>0 else 0
             
-            m1,m2,m3,m4 = st.columns(4)
-            m1.metric("Mères Vivantes", len(df_clot[df_clot['issue_mere']=='Vivante']))
-            m2.metric("Décédées", len(df_clot[df_clot['issue_mere']=='Décédée']))
-            m3.metric("SCAM", len(df_clot[df_clot['issue_mere']=='Sortie contre avis médical']))
-            m4.metric("Référée", len(df_clot[df_clot['issue_mere']=='Référée à nouveau']))
+            k1,k2,k3 = st.columns(3)
+            k1.metric("Voie basse", nb_vb)
+            k2.metric("Césarienne", nb_ces)
+            k3.metric("Proportion Césarienne", f"{prop_ces:.1f}%")
             
-            n1,n2 = st.columns(2)
-            n1.metric("NN Vivants", len(df_clot[df_clot['issue_nouveau_ne']=='Vivant']))
-            n2.metric("NN Décédés", len(df_clot[df_clot['issue_nouveau_ne']=='Décédé']))
+            k4,k5,k6,k7 = st.columns(4)
+            k4.metric("Mère Vivante", len(df_clot[df_clot['issue_mere']=='Vivante']))
+            k5.metric("Mère Décédée", len(df_clot[df_clot['issue_mere']=='Décédée']))
+            k6.metric("SCAM", len(df_clot[df_clot['issue_mere']=='Sortie contre avis médical']))
+            k7.metric("Référée à nouveau", len(df_clot[df_clot['issue_mere']=='Référée à nouveau']))
             
-            fig2 = px.pie(df_clot, names='issue_accouchement', title="Voie d'accouchement")
-            st.plotly_chart(fig2, use_container_width=True)
-            st.dataframe(df_clot[['id','motif','centre_emetteur','issue_mere','issue_accouchement','issue_nouveau_ne']], use_container_width=True)
+            k8,k9,k10 = st.columns(3)
+            k8.metric("NN Vivant", len(df_clot[df_clot['issue_nouveau_ne']=='Vivant']))
+            k9.metric("NN Décédé", len(df_clot[df_clot['issue_nouveau_ne']=='Décédé']))
+            k10.metric("Mort-né", len(df_clot[df_clot['issue_nouveau_ne']=='Mort-né']))
+            
+            c1,c2 = st.columns(2)
+            with c1:
+                fig_acc = px.pie(values=[nb_vb, nb_ces], names=['Voie basse','Césarienne'], title="Répartition accouchement")
+                st.plotly_chart(fig_acc, use_container_width=True)
+            with c2:
+                fig_mere = px.pie(df_clot, names='issue_mere', title="Devenir Mère")
+                st.plotly_chart(fig_mere, use_container_width=True)
