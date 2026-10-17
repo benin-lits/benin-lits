@@ -197,4 +197,4 @@ elif menu == "Dashboard":
             fig_occ = px.bar(df_centres, x='Centre', y='Occupés', color='Taux %', text='Occupés', title="Lits Occupés par Centre")
             st.plotly_chart(fig_occ, use_container_width=True)
         with c2:
-            fig_taux = px.bar(df_centres, x='Centre', y='Taux %', text='Taux %', title="T
+            fig_taux = px.bar(df_centres, x='Centre', y='Taux', text='Taux', title="Taux Occupation par Centre",color='Taux')
