@@ -3,5 +3,5 @@ psycopg2-binary
 pandas
 matplotlib
 openpyxl
-ploty
+plotly
 
