@@ -8,7 +8,13 @@ st.set_page_config(page_title="Bénin LITS - Références", layout="wide")
 
 # --- CONNEXION ---
 def get_connection():
-    return psycopg2.connect(st.secrets["DATABASE_URL"] if "DATABASE_URL" in st.secrets else st.secrets["postgres"]["url"])
+    try:
+        if "DATABASE_URL" in st.secrets:
+            return psycopg2.connect(st.secrets["DATABASE_URL"])
+        else:
+            return psycopg2.connect(st.secrets["postgres"]["url"])
+    except:
+        return psycopg2.connect(st.secrets["DATABASE_URL"])
 
 def get_data():
     conn = get_connection()
@@ -16,58 +22,57 @@ def get_data():
     conn.close()
     return df
 
-# --- MENU ---
-menu = st.sidebar.radio("Menu", ["Nouvelle Référence", "Liste Références", "Saisie Issue (CHD/ZH)", "Dashboard"])
+# --- SIDEBAR ---
+st.sidebar.title("Bénin LITS")
+menu = st.sidebar.radio("Navigation", ["Nouvelle Référence", "Liste Références", "Saisie Issue (CHD/ZH)", "Dashboard"])
+
+df = get_data() if menu != "Nouvelle Référence" else pd.DataFrame()
 
 # 1. NOUVELLE REFERENCE
 if menu == "Nouvelle Référence":
     st.title("📝 Nouvelle Référence")
-    with st.form("ref_form"):
-        col1,col2 = st.columns(2)
-        with col1:
-            centre_emetteur = st.text_input("Centre émetteur")
-            motif = st.selectbox("Motif", ["Hémorragie","Pré-éclampsie/Eclampsie","Travail prolongé","Souffrance fœtale","Autre"])
-            age = st.number_input("Âge", 14, 50)
-        with col2:
-            centre_receveur = st.selectbox("Centre receveur", ["CHD Mono","CHD Atacora","CHU-MEL","CHD Zou","CHD Ouémé","Autre"])
-            gestite = st.text_input("Gestité/Parité")
+    with st.form("ref"):
+        c1,c2 = st.columns(2)
+        with c1:
+            centre_em = st.text_input("Centre émetteur")
+            motif = st.selectbox("Motif", ["Hémorragie","Pré-éclampsie/Eclampsie","Travail prolongé","Souffrance foetale","Rupture utérine","Autre"])
+            age = st.number_input("Âge", 14, 50, 25)
+        with c2:
+            centre_rec = st.selectbox("Centre receveur", ["CHD Mono","CHD Atacora","CHU-MEL","CHD Zou","CHD Ouémé","CHD Plateau","Autre"])
+            gestite = st.text_input("G/P")
             transport = st.selectbox("Transport", ["Ambulance","Moto","Véhicule perso"])
-        
-        if st.form_submit_button("Envoyer"):
+        submit = st.form_submit_button("Envoyer")
+        if submit:
             conn = get_connection()
             cur = conn.cursor()
             cur.execute('INSERT INTO "references" (centre_emetteur, centre_receveur, motif, age, gestite, transport, date_reference) VALUES (%s,%s,%s,%s,%s,%s,NOW())',
-                        (centre_emetteur, centre_receveur, motif, age, gestite, transport))
+                        (centre_em, centre_rec, motif, age, gestite, transport))
             conn.commit()
             conn.close()
-            st.success("Référence envoyée !")
+            st.success("Envoyée !")
+            st.balloons()
 
 # 2. LISTE
 elif menu == "Liste Références":
-    st.title("📋 Liste Références")
-    df = get_data()
+    st.title(f"📋 Liste - TOTAL {len(df)}")
     st.dataframe(df, use_container_width=True)
-    st.metric("TOTAL GENERAL", len(df))
 
-# 3. SAISIE ISSUE - LE PLUS IMPORTANT V6.8
+# 3. SAISIE ISSUE
 elif menu == "Saisie Issue (CHD/ZH)":
-    st.title("🩺 Clôturer - Issue de la référence")
-    st.info("Réservé au centre receveur (CHD/ZH) pour renseigner le devenir")
-    
-    df = get_data()
+    st.title("🩺 Clôturer une référence - CHD/ZH")
     if df.empty:
-        st.warning("Aucune référence")
+        st.warning("Aucune donnée")
     else:
-        # Liste des refs non clôturées
-        df_non_clot = df[(df['issue_mere'].isna()) | (df['issue_mere'] == "")]
-        st.write(f"{len(df_non_clot)} références en attente de clôture")
-        
-        id_ref = st.selectbox("Choisir ID à clôturer", df_non_clot['id'].tolist() if not df_non_clot.empty else [])
-        
+        # sécuriser colonnes
+        for col in ['issue_mere','issue_accouchement','issue_nouveau_ne']:
+            if col not in df.columns:
+                df[col] = ""
+        df_non = df[(df['issue_mere'].isna()) | (df['issue_mere']=="")]
+        st.metric("En attente de clôture", len(df_non))
+        id_ref = st.selectbox("ID à clôturer", df_non['id'].tolist() if not df_non.empty else [])
         if id_ref:
-            ref = df[df['id']==id_ref].iloc[0]
-            st.write(f"**Motif:** {ref['motif']} | **Centre:** {ref['centre_emetteur']} -> {ref['centre_receveur']}")
-            
+            row = df[df['id']==id_ref].iloc[0]
+            st.info(f"Motif: {row['motif']} | De: {row['centre_emetteur']}")
             c1,c2,c3 = st.columns(3)
             with c1:
                 mere = st.selectbox("Mère", ["Vivante","Décédée","Sortie contre avis médical","Référée à nouveau","Évacuée"])
@@ -75,80 +80,59 @@ elif menu == "Saisie Issue (CHD/ZH)":
                 acc = st.selectbox("Accouchement", ["Voie basse","Césarienne"])
             with c3:
                 nn = st.selectbox("Nouveau-né", ["Vivant","Décédé","Mort-né"])
-            
-            if st.button("✅ Enregistrer l'issue", type="primary"):
+            if st.button("✅ Enregistrer", type="primary"):
                 conn = get_connection()
                 cur = conn.cursor()
                 cur.execute('UPDATE "references" SET issue_mere=%s, issue_accouchement=%s, issue_nouveau_ne=%s, date_issue=NOW() WHERE id=%s',
-                            (mere, acc, nn, id_ref))
+                            (mere, acc, nn, int(id_ref)))
                 conn.commit()
                 conn.close()
-                st.success(f"Issue enregistrée pour référence {id_ref} !")
-                st.balloons()
+                st.success(f"Issue {id_ref} enregistrée")
 
-# 4. DASHBOARD V6.8 AVEC KPI ISSUES
+# 4. DASHBOARD V6.8 + TOTAL + ISSUES
 elif menu == "Dashboard":
     st.title("📊 Dashboard V6.8")
-    df = get_data()
-    
     if df.empty:
         st.warning("Pas de données")
     else:
-        total_general = len(df)
-        st.metric("TOTAL GÉNÉRAL DES RÉFÉRENCES", total_general)
-        st.divider()
-        
-        # Graph motifs
-        if 'motif' in df.columns:
-            motif_counts = df['motif'].value_counts().reset_index()
-            motif_counts.columns = ['Motif','Effectif']
-            fig1 = px.bar(motif_counts, x='Effectif', y='Motif', orientation='h', text='Effectif', title=f"Motifs de référence (Total {total_general})")
-            fig1.update_layout(yaxis={'categoryorder':'total ascending'})
-            st.plotly_chart(fig1, use_container_width=True)
-        
-        st.divider()
-        st.subheader("🩺 Issues - Devenir des patientes (Centre Receveur)")
-        
-        # Assurer colonnes
+        st.metric("TOTAL GÉNÉRAL", len(df))
+        # sécuriser
         for col in ['issue_mere','issue_accouchement','issue_nouveau_ne']:
             if col not in df.columns:
                 df[col] = ""
         
-        df_clot = df[df['issue_mere'].notna() & (df['issue_mere'] != "")].copy()
+        # Graph motifs
+        if 'motif' in df.columns:
+            counts = df['motif'].value_counts().reset_index()
+            counts.columns = ['Motif','Effectif']
+            fig = px.bar(counts, x='Effectif', y='Motif', orientation='h', text='Effectif', title=f"Motifs (Total {len(df)})")
+            fig.update_layout(yaxis={'categoryorder':'total ascending'})
+            st.plotly_chart(fig, use_container_width=True)
         
+        st.divider()
+        st.subheader("🩺 Issues - Devenir")
+        df_clot = df[df['issue_mere'].notna() & (df['issue_mere']!="")].copy()
         if df_clot.empty:
-            st.info("Aucune issue saisie pour le moment. Le CHD/ZH doit clôturer dans 'Saisie Issue'")
+            st.info("Aucune issue saisie par CHD/ZH pour le moment")
         else:
-            st.write(f"**{len(df_clot)} références clôturées sur {total_general}** ({len(df_clot)/total_general*100:.1f}%)")
+            nb_vb = len(df_clot[df_clot['issue_accouchement']=='Voie basse'])
+            nb_ces = len(df_clot[df_clot['issue_accouchement']=='Césarienne'])
+            prop = nb_ces/(nb_vb+nb_ces)*100 if (nb_vb+nb_ces)>0 else 0
+            a,b,c = st.columns(3)
+            a.metric("Voie basse", nb_vb)
+            b.metric("Césarienne", nb_ces)
+            c.metric("% Césarienne", f"{prop:.1f}%")
             
-            # KPI Accouchement
-            nb_vb = len(df_clot[df_clot['issue_accouchement'] == 'Voie basse'])
-            nb_cesar = len(df_clot[df_clot['issue_accouchement'] == 'Césarienne'])
-            total_acc = nb_vb + nb_cesar
-            prop_cesar = nb_cesar/total_acc*100 if total_acc>0 else 0
-
-            st.markdown("#### 🤰 Mode d'accouchement")
-            k1,k2,k3 = st.columns(3)
-            k1.metric("Voie basse", nb_vb)
-            k2.metric("Césarienne", nb_cesar)
-            k3.metric("Proportion Césarienne", f"{prop_cesar:.1f}%")
-            
-            fig_acc = px.pie(values=[nb_vb, nb_cesar], names=['Voie basse','Césarienne'], title="Répartition voie d'accouchement")
-            st.plotly_chart(fig_acc, use_container_width=True)
-            
-            st.markdown("#### 👩 Mère")
             m1,m2,m3,m4 = st.columns(4)
-            m1.metric("Vivante", len(df_clot[df_clot['issue_mere'] == 'Vivante']))
-            m2.metric("Décédée", len(df_clot[df_clot['issue_mere'] == 'Décédée']))
-            m3.metric("SCAM", len(df_clot[df_clot['issue_mere'] == 'Sortie contre avis médical']))
-            m4.metric("Référée à nouveau", len(df_clot[df_clot['issue_mere'] == 'Référée à nouveau']))
+            m1.metric("Mères Vivantes", len(df_clot[df_clot['issue_mere']=='Vivante']))
+            m2.metric("Décédées", len(df_clot[df_clot['issue_mere']=='Décédée']))
+            m3.metric("SCAM", len(df_clot[df_clot['issue_mere']=='Sortie contre avis médical']))
+            m4.metric("Référée", len(df_clot[df_clot['issue_mere']=='Référée à nouveau']))
             
-            st.markdown("#### 👶 Nouveau-né")
-            n1,n2,n3 = st.columns(3)
-            n1.metric("Vivant", len(df_clot[df_clot['issue_nouveau_ne'] == 'Vivant']))
-            n2.metric("Décédé", len(df_clot[df_clot['issue_nouveau_ne'] == 'Décédé']))
-            n3.metric("Mort-né", len(df_clot[df_clot['issue_nouveau_ne'] == 'Mort-né']))
+            n1,n2 = st.columns(2)
+            n1.metric("NN Vivants", len(df_clot[df_clot['issue_nouveau_ne']=='Vivant']))
+            n2.metric("NN Décédés", len(df_clot[df_clot['issue_nouveau_ne']=='Décédé']))
             
-            # Tableau récap
-            st.divider()
-            st.dataframe(df_clot[['id','centre_emetteur','motif','issue_mere','issue_accouchement','issue_nouveau_ne','date_issue']], use_container_width=True)
+            fig2 = px.pie(df_clot, names='issue_accouchement', title="Voie d'accouchement")
+            st.plotly_chart(fig2, use_container_width=True)
+            st.dataframe(df_clot[['id','motif','centre_emetteur','issue_mere','issue_accouchement','issue_nouveau_ne']], use_container_width=True)
