@@ -1,197 +1,154 @@
-import streamlit as st
+mport streamlit as st
 import psycopg2
 import pandas as pd
-from math import radians, cos, sin, asin, sqrt
-import urllib.parse
-import matplotlib.pyplot as plt
-from datetime import datetime, timedelta
-import io
+import plotly.express as px
+from datetime import datetime
 
-st.set_page_config(page_title="Benin Lits V6.3 Global+Filtre", layout="wide")
+st.set_page_config(page_title="Bénin LITS - Références", layout="wide")
 
-CENTRES = {
-    "CS COVE": {"lat": 7.216, "lon": 2.336, "lits_total": 0, "password": "cove123", "type": "CS"},
-    "CS ZAGNANADO": {"lat": 7.278, "lon": 2.482, "lits_total": 0, "password": "zagna123", "type": "CS"},
-    "CS OUINHI": {"lat": 7.05, "lon": 2.48, "lits_total": 0, "password": "ouinhi123", "type": "CS"},
-    "CS DJIDJA": {"lat": 7.34, "lon": 1.93, "lits_total": 0, "password": "djidja123", "type": "CS"},
-    "CS ABOMEY": {"lat": 7.182, "lon": 1.99, "lits_total": 0, "password": "abomey123", "type": "CS"},
-    "CHD Zou Abomey": {"lat": 7.182, "lon": 1.99, "lits_total": 50, "password": "chd123", "type": "CHD"},
-    "CNHU Cotonou": {"lat": 6.36, "lon": 2.42, "lits_total": 30, "password": "cnhu123", "type": "CNHU"},
-}
+# --- CONNEXION ---
+def get_connection():
+    return psycopg2.connect(st.secrets["DATABASE_URL"] if "DATABASE_URL" in st.secrets else st.secrets["postgres"]["url"])
 
-def haversine(lat1, lon1, lat2, lon2):
-    R=6371; dlat=radians(lat2-lat1); dlon=radians(lon2-lon1)
-    a=sin(dlat/2)**2 + cos(radians(lat1))*cos(radians(lat2))*sin(dlon/2)**2
-    return round(2*R*asin(sqrt(a)),1)
+def get_data():
+    conn = get_connection()
+    df = pd.read_sql('SELECT * FROM "references" ORDER BY id DESC', conn)
+    conn.close()
+    return df
 
-def get_conn():
-    url = st.secrets["DATABASE_URL"] if "DATABASE_URL" in st.secrets else st.secrets["DB_URL"]
-    return psycopg2.connect(url)
+# --- MENU ---
+menu = st.sidebar.radio("Menu", ["Nouvelle Référence", "Liste Références", "Saisie Issue (CHD/ZH)", "Dashboard"])
 
-def init_db():
-    conn=get_conn(); cur=conn.cursor()
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS benin_refs (
-        id SERIAL PRIMARY KEY, date TIMESTAMP DEFAULT NOW(),
-        centre_origine TEXT, centre_dest TEXT, motif TEXT, age INT, sexe TEXT, details TEXT,
-        distance_km FLOAT, statut TEXT DEFAULT 'en_cours',
-        contre_issue TEXT, contre_diag TEXT, contre_traitement TEXT, contre_reco TEXT, date_sortie TIMESTAMP
-    );
-    CREATE TABLE IF NOT EXISTS lits (centre TEXT PRIMARY KEY, lits_total INT, lits_occupes INT DEFAULT 0);
-    """)
-    for nom, info in CENTRES.items():
-        if info["lits_total"]>0:
-            cur.execute("INSERT INTO lits (centre,lits_total,lits_occupes) VALUES (%s,%s,0) ON CONFLICT (centre) DO NOTHING", (nom, info["lits_total"]))
-    conn.commit(); conn.close()
-init_db()
+# 1. NOUVELLE REFERENCE
+if menu == "Nouvelle Référence":
+    st.title("📝 Nouvelle Référence")
+    with st.form("ref_form"):
+        col1,col2 = st.columns(2)
+        with col1:
+            centre_emetteur = st.text_input("Centre émetteur")
+            motif = st.selectbox("Motif", ["Hémorragie","Pré-éclampsie/Eclampsie","Travail prolongé","Souffrance fœtale","Autre"])
+            age = st.number_input("Âge", 14, 50)
+        with col2:
+            centre_receveur = st.selectbox("Centre receveur", ["CHD Mono","CHD Atacora","CHU-MEL","CHD Zou","CHD Ouémé","Autre"])
+            gestite = st.text_input("Gestité/Parité")
+            transport = st.selectbox("Transport", ["Ambulance","Moto","Véhicule perso"])
+        
+        if st.form_submit_button("Envoyer"):
+            conn = get_connection()
+            cur = conn.cursor()
+            cur.execute('INSERT INTO "references" (centre_emetteur, centre_receveur, motif, age, gestite, transport, date_reference) VALUES (%s,%s,%s,%s,%s,%s,NOW())',
+                        (centre_emetteur, centre_receveur, motif, age, gestite, transport))
+            conn.commit()
+            conn.close()
+            st.success("Référence envoyée !")
 
-if "centre" not in st.session_state:
-    st.title("🏥 Benin Lits V6.3")
-    c = st.selectbox("Je suis", list(CENTRES.keys()))
-    pwd = st.text_input("Mot de passe", type="password")
-    if st.button("Se connecter"):
-        if pwd == CENTRES[c]["password"]:
-            st.session_state.centre=c; st.rerun()
-        else: st.error("Mot de passe incorrect")
-    st.stop()
+# 2. LISTE
+elif menu == "Liste Références":
+    st.title("📋 Liste Références")
+    df = get_data()
+    st.dataframe(df, use_container_width=True)
+    st.metric("TOTAL GENERAL", len(df))
 
-centre_actuel = st.session_state.centre
-st.sidebar.success(f"Connecté: {centre_actuel}")
-if st.sidebar.button("Déconnexion"): del st.session_state.centre; st.rerun()
-menu = st.sidebar.radio("Menu", ["Dashboard", "Nouvelle Référence", "Mes Réceptions", "Contre-références reçues"])
-conn = get_conn()
-
-if menu == "Dashboard":
-    st.subheader(f"Dashboard - {centre_actuel}")
-    df_ref_all = pd.read_sql("SELECT * FROM benin_refs", conn)
-    df_lits = pd.read_sql("SELECT * FROM lits", conn)
-
-    # ===== POINT GLOBAL =====
-    st.write("## 🌍 POINT GLOBAL - Tous centres, toutes dates")
-    total_lits_g = df_lits["lits_total"].sum() if not df_lits.empty else 0
-    total_occ_g = df_lits["lits_occupes"].sum() if not df_lits.empty else 0
-    total_dispo_g = total_lits_g - total_occ_g
-    taux_g = round((total_occ_g/total_lits_g*100) if total_lits_g>0 else 0,1)
-    cumul_g = round(df_ref_all["distance_km"].sum() if not df_ref_all.empty else 0,1)
-
-    c1,c2,c3,c4,c5,c6 = st.columns(6)
-    c1.metric("Total Réf", len(df_ref_all))
-    c2.metric("Total Lits", total_lits_g)
-    c3.metric("Lits Occupés", total_occ_g)
-    c4.metric("Lits Dispo", total_dispo_g)
-    c5.metric("Taux Occupation", f"{taux_g} %")
-    c6.metric("Cumul Distance Total", f"{cumul_g} km")
-
-    if not df_ref_all.empty:
-        colA, colB = st.columns(2)
-        with colA:
-            st.write("### 🥧 Camembert Global - Motifs")
-            motif_counts = df_ref_all["motif"].value_counts()
-            fig, ax = plt.subplots()
-            ax.pie(motif_counts, labels=motif_counts.index, autopct='%1.1f%%', startangle=90)
-            ax.axis('equal')
-            st.pyplot(fig)
-        with colB:
-            st.write("### 🛏️ Lits par Centre - Global")
-            df_lits["lits_dispo"] = df_lits["lits_total"] - df_lits["lits_occupes"]
-            df_lits["taux_occ"] = round(df_lits["lits_occupes"]/df_lits["lits_total"]*100,1)
-            st.dataframe(df_lits)
-        st.write("### 📍 Cumul Global par Centre")
-        cumul_global = df_ref_all.groupby("centre_origine")["distance_km"].agg(['count','sum']).reset_index()
-        cumul_global.columns = ["Centre", "Nb Réf", "Cumul km"]
-        st.dataframe(cumul_global, use_container_width=True)
-
-    st.divider()
+# 3. SAISIE ISSUE - LE PLUS IMPORTANT V6.8
+elif menu == "Saisie Issue (CHD/ZH)":
+    st.title("🩺 Clôturer - Issue de la référence")
+    st.info("Réservé au centre receveur (CHD/ZH) pour renseigner le devenir")
     
-    # ===== POINT FILTRE =====
-    st.write("## 🔍 POINT FILTRÉ - Par Date / Centre / Niveau")
-    f1,f2,f3,f4,f5 = st.columns(5)
-    with f1: date_debut = st.date_input("Du", datetime.now() - timedelta(days=30), key="f_debut")
-    with f2: date_fin = st.date_input("Au", datetime.now(), key="f_fin")
-    with f3: niveau = st.selectbox("Niveau", ["Tous", "CS", "CHD", "CNHU"], key="f_niv")
-    with f4: centre_filtre = st.selectbox("Centre Origine", ["Tous"] + list(CENTRES.keys()), key="f_centre")
-    with f5: dest_filtre = st.selectbox("Destination", ["Tous"] + [c for c in CENTRES if CENTRES[c]["type"]!="CS"], key="f_dest")
-    
-    raccourci = st.selectbox("Raccourci", ["Personnalisé", "Aujourd'hui", "7 jours", "Ce mois", "Tout"], index=4)
-    if raccourci == "Aujourd'hui": date_debut = date_fin = datetime.now().date()
-    elif raccourci == "7 jours": date_debut = (datetime.now() - timedelta(days=7)).date()
-    elif raccourci == "Ce mois": date_debut = datetime.now().replace(day=1).date()
-    elif raccourci == "Tout": date_debut = datetime(2020,1,1).date()
-
-    df_ref = df_ref_all.copy()
-    if not df_ref.empty:
-        df_ref['date_only'] = pd.to_datetime(df_ref['date']).dt.date
-        df_ref = df_ref[(df_ref['date_only'] >= date_debut) & (df_ref['date_only'] <= date_fin)]
-        if niveau != "Tous":
-            centres_niveau = [k for k,v in CENTRES.items() if v["type"]==niveau]
-            df_ref = df_ref[df_ref['centre_origine'].isin(centres_niveau) | df_ref['centre_dest'].isin(centres_niveau)]
-        if centre_filtre != "Tous": df_ref = df_ref[df_ref['centre_origine']==centre_filtre]
-        if dest_filtre != "Tous": df_ref = df_ref[df_ref['centre_dest']==dest_filtre]
-
-    st.info(f"Filtré: {date_debut} au {date_fin} | Niveau: {niveau} | Origine: {centre_filtre} -> {len(df_ref)} ref(s) | Cumul: {round(df_ref['distance_km'].sum(),1) if not df_ref.empty else 0} km")
-    
-    if not df_ref.empty:
-        cumul_f = df_ref.groupby("centre_origine")["distance_km"].agg(['count','sum']).reset_index()
-        cumul_f.columns = ["Centre", "Nb", "Cumul km"]
-        st.dataframe(cumul_f)
-        st.bar_chart(cumul_f.set_index("Centre")["Cumul km"])
-        buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-            df_ref.to_excel(writer, sheet_name='Filtre', index=False)
-            cumul_global.to_excel(writer, sheet_name='Global', index=False)
-        st.download_button("📥 Export Excel Filtré", buffer.getvalue(), file_name=f"benin_lits_{niveau}_{date_debut}.xlsx")
-        st.dataframe(df_ref.sort_values("date", ascending=False))
-
-    if st.button("🗑️ Vider données test"):
-        cur=conn.cursor(); cur.execute("DELETE FROM benin_refs"); cur.execute("UPDATE lits SET lits_occupes=0"); conn.commit(); st.success("Vidé"); st.rerun()
-
-elif menu == "Nouvelle Référence":
-    st.subheader("Nouvelle Référence")
-    dest = st.selectbox("Envoyer à", [c for c in CENTRES if CENTRES[c]["type"]!="CS"])
-    motif = st.selectbox("Motif", ["Eclampsie","HPPI","HRP","Souffrance foetale","Dystocie","Autre"])
-    age = st.number_input("Age", 0, 100, 24)
-    sexe = st.selectbox("Sexe", ["Femme","Homme"])
-    details = st.text_area("Détails", "TA 180/110, Convulsions")
-    dist = haversine(CENTRES[centre_actuel]["lat"], CENTRES[centre_actuel]["lon"], CENTRES[dest]["lat"], CENTRES[dest]["lon"])
-    st.info(f"Distance: {dist} km")
-    if st.button("Envoyer"):
-        cur=conn.cursor()
-        cur.execute("INSERT INTO benin_refs (centre_origine, centre_dest, motif, age, sexe, details, distance_km) VALUES (%s,%s,%s,%s,%s,%s,%s)",
-                    (centre_actuel, dest, motif, age, sexe, details, dist))
-        cur.execute("UPDATE lits SET lits_occupes = lits_occupes + 1 WHERE centre=%s", (dest,))
-        conn.commit()
-        st.success(f"Envoyé à {dest}")
-        msg = f"🚨 REFERENCE: {centre_actuel}->{dest} ({dist}km) Motif:{motif} {sexe} {age}ans Details:{details}"
-        st.markdown(f"[📲 Envoyer alerte WhatsApp](https://wa.me/?text={urllib.parse.quote(msg)})")
-
-elif menu == "Mes Réceptions":
-    st.subheader(f"Réceptions pour {centre_actuel}")
-    df = pd.read_sql("SELECT * FROM benin_refs WHERE centre_dest=%s AND statut IN ('en_cours','accepte') ORDER BY date DESC", conn, params=(centre_actuel,))
-    if df.empty: st.info("Aucune réception")
+    df = get_data()
+    if df.empty:
+        st.warning("Aucune référence")
     else:
-        for _, row in df.iterrows():
-            with st.expander(f"#{row['id']} {row['motif']} de {row['centre_origine']} - {row['distance_km']}km"):
-                st.write(f"{row['age']} / {row['sexe']} - {row['details']}")
-                if row['statut']=='en_cours':
-                    if st.button(f"✅ Accepter {row['id']}", key=f"acc{row['id']}"):
-                        cur=conn.cursor(); cur.execute("UPDATE benin_refs SET statut='accepte' WHERE id=%s", (row['id'],)); conn.commit(); st.rerun()
-                st.divider()
-                st.write("**📝 Contre-référence**")
-                issue = st.selectbox("Issue", ["Guérie","Décédée","Référée CNHU","Retour domicile"], key=f"iss{row['id']}")
-                diag = st.text_input("Diag final", key=f"diag{row['id']}")
-                trait = st.text_area("Traitement", key=f"tr{row['id']}")
-                reco = st.text_area("Reco CS", key=f"reco{row['id']}")
-                if st.button(f"📤 Envoyer CR {row['id']}", key=f"cr{row['id']}"):
-                    cur=conn.cursor()
-                    cur.execute("UPDATE benin_refs SET statut='contre_referee', contre_issue=%s, contre_diag=%s, contre_traitement=%s, contre_reco=%s, date_sortie=NOW() WHERE id=%s",
-                                (issue, diag, trait, reco, row['id']))
-                    cur.execute("UPDATE lits SET lits_occupes = GREATEST(lits_occupes-1,0) WHERE centre=%s", (centre_actuel,))
-                    conn.commit(); st.success("Envoyée"); st.rerun()
+        # Liste des refs non clôturées
+        df_non_clot = df[(df['issue_mere'].isna()) | (df['issue_mere'] == "")]
+        st.write(f"{len(df_non_clot)} références en attente de clôture")
+        
+        id_ref = st.selectbox("Choisir ID à clôturer", df_non_clot['id'].tolist() if not df_non_clot.empty else [])
+        
+        if id_ref:
+            ref = df[df['id']==id_ref].iloc[0]
+            st.write(f"**Motif:** {ref['motif']} | **Centre:** {ref['centre_emetteur']} -> {ref['centre_receveur']}")
+            
+            c1,c2,c3 = st.columns(3)
+            with c1:
+                mere = st.selectbox("Mère", ["Vivante","Décédée","Sortie contre avis médical","Référée à nouveau","Évacuée"])
+            with c2:
+                acc = st.selectbox("Accouchement", ["Voie basse","Césarienne"])
+            with c3:
+                nn = st.selectbox("Nouveau-né", ["Vivant","Décédé","Mort-né"])
+            
+            if st.button("✅ Enregistrer l'issue", type="primary"):
+                conn = get_connection()
+                cur = conn.cursor()
+                cur.execute('UPDATE "references" SET issue_mere=%s, issue_accouchement=%s, issue_nouveau_ne=%s, date_issue=NOW() WHERE id=%s',
+                            (mere, acc, nn, id_ref))
+                conn.commit()
+                conn.close()
+                st.success(f"Issue enregistrée pour référence {id_ref} !")
+                st.balloons()
 
-elif menu == "Contre-références reçues":
-    st.subheader(f"Contre-références pour {centre_actuel}")
-    df = pd.read_sql("SELECT * FROM benin_refs WHERE centre_origine=%s AND statut='contre_referee' ORDER BY date_sortie DESC", conn, params=(centre_actuel,))
-    if df.empty: st.info("Aucune")
-    else: st.dataframe(df)
+# 4. DASHBOARD V6.8 AVEC KPI ISSUES
+elif menu == "Dashboard":
+    st.title("📊 Dashboard V6.8")
+    df = get_data()
+    
+    if df.empty:
+        st.warning("Pas de données")
+    else:
+        total_general = len(df)
+        st.metric("TOTAL GÉNÉRAL DES RÉFÉRENCES", total_general)
+        st.divider()
+        
+        # Graph motifs
+        if 'motif' in df.columns:
+            motif_counts = df['motif'].value_counts().reset_index()
+            motif_counts.columns = ['Motif','Effectif']
+            fig1 = px.bar(motif_counts, x='Effectif', y='Motif', orientation='h', text='Effectif', title=f"Motifs de référence (Total {total_general})")
+            fig1.update_layout(yaxis={'categoryorder':'total ascending'})
+            st.plotly_chart(fig1, use_container_width=True)
+        
+        st.divider()
+        st.subheader("🩺 Issues - Devenir des patientes (Centre Receveur)")
+        
+        # Assurer colonnes
+        for col in ['issue_mere','issue_accouchement','issue_nouveau_ne']:
+            if col not in df.columns:
+                df[col] = ""
+        
+        df_clot = df[df['issue_mere'].notna() & (df['issue_mere'] != "")].copy()
+        
+        if df_clot.empty:
+            st.info("Aucune issue saisie pour le moment. Le CHD/ZH doit clôturer dans 'Saisie Issue'")
+        else:
+            st.write(f"**{len(df_clot)} références clôturées sur {total_general}** ({len(df_clot)/total_general*100:.1f}%)")
+            
+            # KPI Accouchement
+            nb_vb = len(df_clot[df_clot['issue_accouchement'] == 'Voie basse'])
+            nb_cesar = len(df_clot[df_clot['issue_accouchement'] == 'Césarienne'])
+            total_acc = nb_vb + nb_cesar
+            prop_cesar = nb_cesar/total_acc*100 if total_acc>0 else 0
 
-conn.close()
+            st.markdown("#### 🤰 Mode d'accouchement")
+            k1,k2,k3 = st.columns(3)
+            k1.metric("Voie basse", nb_vb)
+            k2.metric("Césarienne", nb_cesar)
+            k3.metric("Proportion Césarienne", f"{prop_cesar:.1f}%")
+            
+            fig_acc = px.pie(values=[nb_vb, nb_cesar], names=['Voie basse','Césarienne'], title="Répartition voie d'accouchement")
+            st.plotly_chart(fig_acc, use_container_width=True)
+            
+            st.markdown("#### 👩 Mère")
+            m1,m2,m3,m4 = st.columns(4)
+            m1.metric("Vivante", len(df_clot[df_clot['issue_mere'] == 'Vivante']))
+            m2.metric("Décédée", len(df_clot[df_clot['issue_mere'] == 'Décédée']))
+            m3.metric("SCAM", len(df_clot[df_clot['issue_mere'] == 'Sortie contre avis médical']))
+            m4.metric("Référée à nouveau", len(df_clot[df_clot['issue_mere'] == 'Référée à nouveau']))
+            
+            st.markdown("#### 👶 Nouveau-né")
+            n1,n2,n3 = st.columns(3)
+            n1.metric("Vivant", len(df_clot[df_clot['issue_nouveau_ne'] == 'Vivant']))
+            n2.metric("Décédé", len(df_clot[df_clot['issue_nouveau_ne'] == 'Décédé']))
+            n3.metric("Mort-né", len(df_clot[df_clot['issue_nouveau_ne'] == 'Mort-né']))
+            
+            # Tableau récap
+            st.divider()
+            st.dataframe(df_clot[['id','centre_emetteur','motif','issue_mere','issue_accouchement','issue_nouveau_ne','date_issue']], use_container_width=True)
