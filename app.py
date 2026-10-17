@@ -121,4 +121,77 @@ if menu == "Dashboard":
     df_ref = df_ref_all.copy()
     if not df_ref.empty:
         df_ref['date_only'] = pd.to_datetime(df_ref['date']).dt.date
-        df_ref = df_ref
+        df_ref = df_ref[(df_ref['date_only'] >= date_debut) & (df_ref['date_only'] <= date_fin)]
+        if niveau != "Tous":
+            centres_niveau = [k for k,v in CENTRES.items() if v["type"]==niveau]
+            df_ref = df_ref[df_ref['centre_origine'].isin(centres_niveau) | df_ref['centre_dest'].isin(centres_niveau)]
+        if centre_filtre != "Tous": df_ref = df_ref[df_ref['centre_origine']==centre_filtre]
+        if dest_filtre != "Tous": df_ref = df_ref[df_ref['centre_dest']==dest_filtre]
+
+    st.info(f"Filtré: {date_debut} au {date_fin} | Niveau: {niveau} | Origine: {centre_filtre} -> {len(df_ref)} ref(s) | Cumul: {round(df_ref['distance_km'].sum(),1) if not df_ref.empty else 0} km")
+    
+    if not df_ref.empty:
+        cumul_f = df_ref.groupby("centre_origine")["distance_km"].agg(['count','sum']).reset_index()
+        cumul_f.columns = ["Centre", "Nb", "Cumul km"]
+        st.dataframe(cumul_f)
+        st.bar_chart(cumul_f.set_index("Centre")["Cumul km"])
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+            df_ref.to_excel(writer, sheet_name='Filtre', index=False)
+            cumul_global.to_excel(writer, sheet_name='Global', index=False)
+        st.download_button("📥 Export Excel Filtré", buffer.getvalue(), file_name=f"benin_lits_{niveau}_{date_debut}.xlsx")
+        st.dataframe(df_ref.sort_values("date", ascending=False))
+
+    if st.button("🗑️ Vider données test"):
+        cur=conn.cursor(); cur.execute("DELETE FROM benin_refs"); cur.execute("UPDATE lits SET lits_occupes=0"); conn.commit(); st.success("Vidé"); st.rerun()
+
+elif menu == "Nouvelle Référence":
+    st.subheader("Nouvelle Référence")
+    dest = st.selectbox("Envoyer à", [c for c in CENTRES if CENTRES[c]["type"]!="CS"])
+    motif = st.selectbox("Motif", ["Eclampsie","HPPI","HRP","Souffrance foetale","Dystocie","Autre"])
+    age = st.number_input("Age", 0, 100, 24)
+    sexe = st.selectbox("Sexe", ["Femme","Homme"])
+    details = st.text_area("Détails", "TA 180/110, Convulsions")
+    dist = haversine(CENTRES[centre_actuel]["lat"], CENTRES[centre_actuel]["lon"], CENTRES[dest]["lat"], CENTRES[dest]["lon"])
+    st.info(f"Distance: {dist} km")
+    if st.button("Envoyer"):
+        cur=conn.cursor()
+        cur.execute("INSERT INTO benin_refs (centre_origine, centre_dest, motif, age, sexe, details, distance_km) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                    (centre_actuel, dest, motif, age, sexe, details, dist))
+        cur.execute("UPDATE lits SET lits_occupes = lits_occupes + 1 WHERE centre=%s", (dest,))
+        conn.commit()
+        st.success(f"Envoyé à {dest}")
+        msg = f"🚨 REFERENCE: {centre_actuel}->{dest} ({dist}km) Motif:{motif} {sexe} {age}ans Details:{details}"
+        st.markdown(f"[📲 Envoyer alerte WhatsApp](https://wa.me/?text={urllib.parse.quote(msg)})")
+
+elif menu == "Mes Réceptions":
+    st.subheader(f"Réceptions pour {centre_actuel}")
+    df = pd.read_sql("SELECT * FROM benin_refs WHERE centre_dest=%s AND statut IN ('en_cours','accepte') ORDER BY date DESC", conn, params=(centre_actuel,))
+    if df.empty: st.info("Aucune réception")
+    else:
+        for _, row in df.iterrows():
+            with st.expander(f"#{row['id']} {row['motif']} de {row['centre_origine']} - {row['distance_km']}km"):
+                st.write(f"{row['age']} / {row['sexe']} - {row['details']}")
+                if row['statut']=='en_cours':
+                    if st.button(f"✅ Accepter {row['id']}", key=f"acc{row['id']}"):
+                        cur=conn.cursor(); cur.execute("UPDATE benin_refs SET statut='accepte' WHERE id=%s", (row['id'],)); conn.commit(); st.rerun()
+                st.divider()
+                st.write("**📝 Contre-référence**")
+                issue = st.selectbox("Issue", ["Guérie","Décédée","Référée CNHU","Retour domicile"], key=f"iss{row['id']}")
+                diag = st.text_input("Diag final", key=f"diag{row['id']}")
+                trait = st.text_area("Traitement", key=f"tr{row['id']}")
+                reco = st.text_area("Reco CS", key=f"reco{row['id']}")
+                if st.button(f"📤 Envoyer CR {row['id']}", key=f"cr{row['id']}"):
+                    cur=conn.cursor()
+                    cur.execute("UPDATE benin_refs SET statut='contre_referee', contre_issue=%s, contre_diag=%s, contre_traitement=%s, contre_reco=%s, date_sortie=NOW() WHERE id=%s",
+                                (issue, diag, trait, reco, row['id']))
+                    cur.execute("UPDATE lits SET lits_occupes = GREATEST(lits_occupes-1,0) WHERE centre=%s", (centre_actuel,))
+                    conn.commit(); st.success("Envoyée"); st.rerun()
+
+elif menu == "Contre-références reçues":
+    st.subheader(f"Contre-références pour {centre_actuel}")
+    df = pd.read_sql("SELECT * FROM benin_refs WHERE centre_origine=%s AND statut='contre_referee' ORDER BY date_sortie DESC", conn, params=(centre_actuel,))
+    if df.empty: st.info("Aucune")
+    else: st.dataframe(df)
+
+conn.close()
