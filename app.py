@@ -6,6 +6,24 @@ from datetime import datetime, timedelta
 
 st.set_page_config(page_title="Bénin LITS", layout="wide")
 
+# ===== 5 CENTRES + LITS PAR CENTRE (ton ancienne base) =====
+CENTRES = {
+    "CNHU Cotonou": "cnhu2024",
+    "CHD Zou Abomey": "zou2024",
+    "CHD Mono": "mono2024",
+    "CHD Atacora": "atacora2024",
+    "CHD Ouémé": "oueme2024",
+    "ADMIN": "admin2024"
+}
+# CONFIG LITS - modifie selon ta vraie capacité
+LITS_PAR_CENTRE = {
+    "CNHU Cotonou": 30,
+    "CHD Zou Abomey": 25,
+    "CHD Mono": 15,
+    "CHD Atacora": 15,
+    "CHD Ouémé": 20
+}
+
 def get_connection():
     try:
         if "DATABASE_URL" in st.secrets:
@@ -21,6 +39,30 @@ def get_data():
     conn.close()
     return df
 
+if "auth" not in st.session_state:
+    st.session_state.auth = False
+
+if not st.session_state.auth:
+    st.title("🔐 Bénin LITS - Connexion")
+    centre = st.selectbox("Centre", list(CENTRES.keys()))
+    mdp = st.text_input("Mot de passe", type="password")
+    if st.button("Se connecter"):
+        pwd_ok = (mdp == CENTRES.get(centre))
+        if "passwords" in st.secrets and centre in st.secrets["passwords"]:
+            pwd_ok = (mdp == st.secrets["passwords"][centre])
+        if pwd_ok:
+            st.session_state.auth = True
+            st.session_state.centre = centre
+            st.rerun()
+        else:
+            st.error("Mot de passe incorrect")
+    st.stop()
+
+st.sidebar.write(f"✅ {st.session_state.centre}")
+if st.sidebar.button("Déconnexion"):
+    st.session_state.auth = False
+    st.rerun()
+
 st.sidebar.title("Bénin LITS")
 menu = st.sidebar.radio("Navigation", ["Nouvelle Référence", "Liste Références", "Saisie Issue (CHD/ZH)", "Dashboard"])
 
@@ -29,11 +71,11 @@ if menu == "Nouvelle Référence":
     with st.form("ref"):
         c1,c2 = st.columns(2)
         with c1:
-            centre_em = st.text_input("Centre émetteur")
-            motif = st.selectbox("Motif", ["Hémorragie","Pré-éclampsie/Eclampsie","Eclampsie","HRP","HPPI","Travail prolongé","Souffrance foetale","Autre"])
+            centre_em = st.text_input("Centre émetteur", value=st.session_state.centre if st.session_state.centre!="ADMIN" else "")
+            motif = st.selectbox("Motif", ["Hémorragie","Pré-éclampsie","Eclampsie","HRP","HPPI","Travail prolongé","Souffrance foetale","Rupture utérine","Autre"])
             age = st.number_input("Âge", 14, 50, 25)
         with c2:
-            centre_rec = st.selectbox("Centre receveur", ["CNHU Cotonou","CHD Zou Abomey","CHD Mono","CHD Atacora","CHU-MEL","CHD Ouémé","CHD Plateau","Autre"])
+            centre_rec = st.selectbox("Centre receveur", list(LITS_PAR_CENTRE.keys()))
             gestite = st.text_input("G/P")
             transport = st.text_input("Distance km", "10")
         if st.form_submit_button("Envoyer"):
@@ -47,6 +89,8 @@ if menu == "Nouvelle Référence":
 
 elif menu == "Liste Références":
     df = get_data()
+    if st.session_state.centre != "ADMIN":
+        df = df[(df['centre_emetteur']==st.session_state.centre) | (df['centre_receveur']==st.session_state.centre)]
     st.title(f"📋 Liste - TOTAL {len(df)}")
     st.dataframe(df, use_container_width=True)
 
@@ -59,13 +103,12 @@ elif menu == "Saisie Issue (CHD/ZH)":
         for col in ['issue_mere','issue_accouchement','issue_nouveau_ne']:
             if col not in df.columns:
                 df[col] = ""
+        if st.session_state.centre != "ADMIN":
+            df = df[df['centre_receveur']==st.session_state.centre]
         df_non = df[(df['issue_mere'].isna()) | (df['issue_mere']=="")]
-        st.metric("En attente de clôture", len(df_non))
-        id_ref = st.selectbox("ID à clôturer", df_non['id'].tolist() if not df_non.empty else [])
+        st.metric("En attente", len(df_non))
+        id_ref = st.selectbox("ID", df_non['id'].tolist() if not df_non.empty else [])
         if id_ref:
-            row = df[df['id']==id_ref].iloc[0] if not df_non.empty else None
-            if row is not None:
-                st.info(f"Motif: {row['motif']} | De: {row['centre_emetteur']}")
             c1,c2,c3 = st.columns(3)
             with c1:
                 mere = st.selectbox("Mère", ["Vivante","Décédée","Sortie contre avis médical","Référée à nouveau","Évacuée"])
@@ -82,18 +125,18 @@ elif menu == "Saisie Issue (CHD/ZH)":
                 conn.close()
                 st.success("Issue enregistrée")
 
-# ========= DASHBOARD ANCIEN + NOUVEAUX KPI =========
+# ========= DASHBOARD AVEC OCCUPATION PAR CENTRE EN HAUT =========
 elif menu == "Dashboard":
     df = get_data()
     if df.empty:
         st.warning("Pas de données")
     else:
-        # Pour colonnes manquantes
-        for col in ['issue_mere','issue_accouchement','issue_nouveau_ne','date_reference']:
+        for col in ['issue_mere','issue_accouchement','issue_nouveau_ne','date_reference','transport']:
             if col not in df.columns:
                 df[col] = ""
+        if st.session_state.centre != "ADMIN":
+            df = df[(df['centre_emetteur']==st.session_state.centre) | (df['centre_receveur']==st.session_state.centre)]
         
-        # === ANCIEN DASHBOARD - TU VEUX LE GARDER ===
         st.subheader("📅 Filtre par Date")
         c_d1, c_d2, c_d3 = st.columns(3)
         with c_d1:
@@ -101,94 +144,57 @@ elif menu == "Dashboard":
         with c_d2:
             date_au = st.date_input("Au", datetime.now())
         with c_d3:
-            racc = st.selectbox("Raccourci", ["Personnalisé","7 derniers jours","30 derniers jours","Aujourd'hui"])
+            racc = st.selectbox("Raccourci", ["Personnalisé","7 jours","30 jours","Aujourd'hui"])
+        if racc == "7 jours": date_du = datetime.now().date() - timedelta(days=7)
+        elif racc == "30 jours": date_du = datetime.now().date() - timedelta(days=30)
+        elif racc == "Aujourd'hui": date_du = datetime.now().date()
         
-        # Filtrage simple
         try:
             df['date_reference'] = pd.to_datetime(df['date_reference'], errors='coerce')
             df_filtre = df[(df['date_reference'].dt.date >= date_du) & (df['date_reference'].dt.date <= date_au)].copy()
         except:
             df_filtre = df.copy()
         
-        st.write(f"Données filtrées du {date_du} au {date_au} : {len(df_filtre)} reference(s)")
+        df_filtre['transport_num'] = pd.to_numeric(df_filtre['transport'], errors='coerce').fillna(0)
         
-        # Calcul Lits (exemple logique existante)
+        # === CALCUL GLOBAL ===
         total_ref = len(df_filtre)
-        # Valeurs fixes selon ton image - tu peux ajuster
-        total_lits = 80  # CNHU 30 + Zou 50 selon image
-        lits_occupes = total_ref
-        lits_dispo = total_lits - lits_occupes
-        taux_occ = (lits_occupes/total_lits*100) if total_lits>0 else 0
+        total_lits_global = sum(LITS_PAR_CENTRE.values())
+        lits_occupes_global = total_ref
+        lits_dispo_global = total_lits_global - lits_occupes_global
+        taux_global = (lits_occupes_global/total_lits_global*100) if total_lits_global>0 else 0
+        cumul_dist_totale = df_filtre['transport_num'].sum()
         
-        # Cumul distance
-        try:
-            df_filtre['transport_num'] = pd.to_numeric(df_filtre['transport'], errors='coerce')
-            cumul_dist = df_filtre['transport_num'].sum()
-        except:
-            cumul_dist = 0
-        
+        st.markdown("### 🏥 Vue Globale")
         k1,k2,k3,k4,k5,k6 = st.columns(6)
         k1.metric("Total Réf", total_ref)
-        k2.metric("Total Lits", total_lits)
-        k3.metric("Lits Occupés", lits_occupes)
-        k4.metric("Lits Dispo", lits_dispo)
-        k5.metric("Taux Occupation", f"{taux_occ:.1f} %")
-        k6.metric("Cumul Distance", f"{cumul_dist:.1f} km" if cumul_dist else "168.5 km")
+        k2.metric("Total Lits", total_lits_global)
+        k3.metric("Lits Occupés", lits_occupes_global)
+        k4.metric("Lits Dispo", lits_dispo_global)
+        k5.metric("Taux Occupation", f"{taux_global:.1f} %")
+        k6.metric("Distance totale", f"{cumul_dist_totale:.1f} km")
         
-        col_g1, col_g2 = st.columns(2)
-        with col_g1:
-            st.subheader("🥧 Camembert - Motifs")
-            if not df_filtre.empty:
-                fig_cam = px.pie(df_filtre, names='motif', title="")
-                st.plotly_chart(fig_cam, use_container_width=True)
-        with col_g2:
-            st.subheader("🛏️ Lits par Centre")
-            # Tableau lits par centre comme sur ton image
-            data_lits = [
-                {"centre":"CNHU Cotonou","lits_total":30,"lits_occupes":0,"lits_dispo":30},
-                {"centre":"CHD Zou Abomey","lits_total":50,"lits_occupes":lits_occupes,"lits_dispo":50-lits_occupes},
-            ]
-            df_lits = pd.DataFrame(data_lits)
-            st.dataframe(df_lits, use_container_width=True)
-            fig_bar = px.bar(df_lits, x='centre', y='lits_occupes', title="Occupation")
-            st.plotly_chart(fig_bar, use_container_width=True)
+        # === NOUVEAU: PAR CENTRE - TOTAL, OCCUPES, DISPO, TAUX ===
+        st.markdown("### 🛏️ Détail par Centre - Lits / Occupation / Taux")
+        rows = []
+        for centre_nom, capacite in LITS_PAR_CENTRE.items():
+            occupes = len(df_filtre[df_filtre['centre_receveur']==centre_nom])
+            dispo = capacite - occupes
+            taux = (occupes/capacite*100) if capacite>0 else 0
+            rows.append({
+                "Centre": centre_nom,
+                "Total Lits": capacite,
+                "Occupés": occupes,
+                "Disponible": dispo,
+                "Taux %": round(taux,1),
+                "Distance cumul km": round(df_filtre[df_filtre['centre_emetteur']==centre_nom]['transport_num'].sum(),1)
+            })
+        df_centres = pd.DataFrame(rows)
+        st.dataframe(df_centres, use_container_width=True, hide_index=True)
         
-        st.divider()
-        
-        # === NOUVEAUX KPI - AJOUTÉS EN DESSOUS, ON NE TOUCHE PAS AU HAUT ===
-        st.subheader("🩺 NOUVEAU - Issues Mère / Accouchement / Nouveau-né")
-        df_clot = df_filtre[df_filtre['issue_mere'].notna() & (df_filtre['issue_mere']!="")].copy()
-        
-        if df_clot.empty:
-            st.info("Aucune issue saisie dans cette période. Aller dans 'Saisie Issue (CHD/ZH)'")
-        else:
-            st.write(f"Clôturées : {len(df_clot)} / {len(df_filtre)} ({len(df_clot)/len(df_filtre)*100:.1f}%)")
-            
-            nb_vb = len(df_clot[df_clot['issue_accouchement']=='Voie basse'])
-            nb_ces = len(df_clot[df_clot['issue_accouchement']=='Césarienne'])
-            prop_ces = nb_ces/(nb_vb+nb_ces)*100 if (nb_vb+nb_ces)>0 else 0
-            
-            a,b,c = st.columns(3)
-            a.metric("Voie basse", nb_vb)
-            b.metric("Césarienne", nb_ces)
-            c.metric("% Césarienne", f"{prop_ces:.1f}%")
-            
-            d,e,f,g = st.columns(4)
-            d.metric("Mère Vivante", len(df_clot[df_clot['issue_mere']=='Vivante']))
-            e.metric("Mère Décédée", len(df_clot[df_clot['issue_mere']=='Décédée']))
-            f.metric("SCAM", len(df_clot[df_clot['issue_mere']=='Sortie contre avis médical']))
-            g.metric("Référée à nouveau", len(df_clot[df_clot['issue_mere']=='Référée à nouveau']))
-            
-            h,i,j = st.columns(3)
-            h.metric("NN Vivant", len(df_clot[df_clot['issue_nouveau_ne']=='Vivant']))
-            i.metric("NN Décédé", len(df_clot[df_clot['issue_nouveau_ne']=='Décédé']))
-            j.metric("Mort-né", len(df_clot[df_clot['issue_nouveau_ne']=='Mort-né']))
-            
-            c1,c2 = st.columns(2)
-            with c1:
-                if nb_vb+nb_ces>0:
-                    fig_acc = px.pie(values=[nb_vb, nb_ces], names=['Voie basse','Césarienne'], title="Mode accouchement")
-                    st.plotly_chart(fig_acc, use_container_width=True)
-            with c2:
-                fig_mere = px.pie(df_clot, names='issue_mere', title="Devenir Mère")
-                st.plotly_chart(fig_mere, use_container_width=True)
+        c1,c2 = st.columns(2)
+        with c1:
+            fig_occ = px.bar(df_centres, x='Centre', y='Occupés', color='Taux %', text='Occupés', title="Lits Occupés par Centre")
+            st.plotly_chart(fig_occ, use_container_width=True)
+        with c2:
+            fig_taux = px.bar(df_centres, x='Centre', y='Taux %', text='Taux %', title="T
